@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Merge modern CAF common used by mondrian; fail closed on conflicts
+      - name: Merge modern CAF common used by mondrian with explicit conflict resolution
         shell: bash
         run: |
           set -euo pipefail
@@ -26,27 +26,70 @@ jobs:
           git fetch --no-tags modern refs/heads/lineage-24.0
           upstream="$(git rev-parse FETCH_HEAD^{commit})"
           test "$upstream" = "c7eda1ff7fd99f29999abbe19922ce59a41ee000"
-
-          if ! git merge --no-ff --no-edit -m "merge: preserve PE Qualcomm common history and update to modern sm8450 API" "$upstream"; then
-            echo "::error::Manual Qualcomm merge required. No old API or manifest pushed."
-            git diff --name-only --diff-filter=U
-            git status --short
-            exit 1
+          if git merge --no-ff --no-edit -m "merge: PE Qualcomm common history and Android17 sm8450 source" "$upstream"; then
+            echo "No merge conflicts"
+          else
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            expected="$(printf '%s\n' \
+              Android.bp BoardConfigQcom.mk compatibility_matrix.xml \
+              os_pickup_sepolicy_vndr.mk qcom_boards.mk qcom_defs.mk \
+              vendor_framework_compatibility_matrix.xml)"
+            if [ "$conflicts" != "$expected" ]; then
+              echo "::error::Unknown conflict files, source remains untouched"
+              git status --short
+              exit 1
+            fi
+            # Current sm8450 tree needs the newer Soong/VINTF/board contracts.
+            # The PE 2024 content remains accessible through the first parent.
+            git checkout --theirs -- \
+              Android.bp BoardConfigQcom.mk compatibility_matrix.xml \
+              os_pickup_sepolicy_vndr.mk qcom_boards.mk qcom_defs.mk \
+              vendor_framework_compatibility_matrix.xml
+            git add Android.bp BoardConfigQcom.mk compatibility_matrix.xml \
+              os_pickup_sepolicy_vndr.mk qcom_boards.mk qcom_defs.mk \
+              vendor_framework_compatibility_matrix.xml
+            git commit -m "merge: resolve QCOM common conflicts using modern sm8450 contracts"
           fi
 
+          python3 - <<'PY'
+          from pathlib import Path
+          # PixelExperience is independent, so do not depend on a Lineage product policy.
+          policy = Path("os_pickup_sepolicy_vndr.mk")
+          current = policy.read_text()
+          legacy = "-include device/lineage/sepolicy/qcom/sepolicy.mk"
+          assert current.count(legacy) == 1
+          policy.write_text(current.replace(legacy,
+              "# PE: device-specific SEPolicy is selected by the target device BoardConfig"))
+
+          # An optional historic bootctrl namespace must not become a hard
+          # dependency of AOSP17 before a verified native QTI Boot HAL exists.
+          board = Path("BoardConfigQcom.mk")
+          source = board.read_text()
+          old = "PRODUCT_SOONG_NAMESPACES += hardware/qcom-caf/bootctrl"
+          assert source.count(old) == 1
+          new = ("ifneq ($(wildcard hardware/qcom-caf/bootctrl/Android.bp),)\n"
+                 "PRODUCT_SOONG_NAMESPACES += hardware/qcom-caf/bootctrl\n"
+                 "endif")
+          board.write_text(source.replace(old, new))
+          PY
+          git add os_pickup_sepolicy_vndr.mk BoardConfigQcom.mk
+          git commit -m "qcom: decouple independent PE A17 product from Lineage policy and absent bootctrl"
+
           git merge-base --is-ancestor "$upstream" HEAD
-          git merge-base --is-ancestor "6b4f72d727f21962abcc5c545ebadc0d520fcbda" HEAD
           test -f common.mk
           test -f compatibility_matrix_aidl.xml
           test -f linker.config.json
           test -f libqti-perfd-client/Android.bp
-          grep -q 'libqti-perfd-client' Android.bp
-          grep -q 'PRODUCT_VENDOR_LINKER_CONFIG_FRAGMENTS' common.mk
-          git diff --check HEAD^1 HEAD
+          grep -Fq 'name: "libqti-perfd-client"' libqti-perfd-client/Android.bp
+          grep -Fq 'PRODUCT_VENDOR_LINKER_CONFIG_FRAGMENTS' common.mk
+          grep -Fq 'qti_audio_kernel_uapi' Android.bp
+          grep -Fq 'QCOM_SOONG_NAMESPACE' BoardConfigQcom.mk
+          grep -Fq 'ifneq ($(wildcard hardware/qcom-caf/bootctrl/Android.bp),)' BoardConfigQcom.mk
+          ! grep -Fq 'device/lineage/sepolicy' os_pickup_sepolicy_vndr.mk
+          git diff --check HEAD~1 HEAD
           git push origin HEAD:refs/heads/integrate/a17-sm8450-qcom-common-20261105
 
-      - name: Source gate only
+      - name: Source boundary
         if: always()
         run: |
-          echo "Do not activate archived PE Qualcomm HALs in active AOSP17 source graph."
-          echo "This job does not build an Android17 device/product or validate vendor ABI."
+          echo "Modern sm8450 source merge only. No AOSP17 product build or vendor HAL runtime was tested."
