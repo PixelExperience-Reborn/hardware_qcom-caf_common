@@ -1,0 +1,52 @@
+name: PE Android17 Qualcomm common source integration
+
+on:
+  push:
+    branches: [integrate/a17-sm8450-qcom-common-20261105]
+    paths: [.github/workflows/android17-qcom-common-merge.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  merge-modern-sm8450-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Merge modern CAF common used by mondrian; fail closed on conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/integrate/a17-sm8450-qcom-common-20261105"
+          git config user.name "PixelExperience-Reborn CI"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add modern https://github.com/LineageOS/android_hardware_qcom-caf_common.git
+          git fetch --no-tags modern refs/heads/lineage-24.0
+          upstream="$(git rev-parse FETCH_HEAD^{commit})"
+          test "$upstream" = "c7eda1ff7fd99f29999abbe19922ce59a41ee000"
+
+          if ! git merge --no-ff --no-edit -m "merge: preserve PE Qualcomm common history and update to modern sm8450 API" "$upstream"; then
+            echo "::error::Manual Qualcomm merge required. No old API or manifest pushed."
+            git diff --name-only --diff-filter=U
+            git status --short
+            exit 1
+          fi
+
+          git merge-base --is-ancestor "$upstream" HEAD
+          git merge-base --is-ancestor "6b4f72d727f21962abcc5c545ebadc0d520fcbda" HEAD
+          test -f common.mk
+          test -f compatibility_matrix_aidl.xml
+          test -f linker.config.json
+          test -f libqti-perfd-client/Android.bp
+          grep -q 'libqti-perfd-client' Android.bp
+          grep -q 'PRODUCT_VENDOR_LINKER_CONFIG_FRAGMENTS' common.mk
+          git diff --check HEAD^1 HEAD
+          git push origin HEAD:refs/heads/integrate/a17-sm8450-qcom-common-20261105
+
+      - name: Source gate only
+        if: always()
+        run: |
+          echo "Do not activate archived PE Qualcomm HALs in active AOSP17 source graph."
+          echo "This job does not build an Android17 device/product or validate vendor ABI."
